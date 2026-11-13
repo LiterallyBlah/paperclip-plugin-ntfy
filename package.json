@@ -1,0 +1,63 @@
+{
+  "name": "paperclip-plugin-ntfy",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Paperclip plugin that sends a minimal ntfy push when a decision is waiting for a person",
+  "license": "MIT",
+  "author": "LiterallyBlah",
+  "homepage": "https://github.com/LiterallyBlah/paperclip-plugin-ntfy",
+  "bugs": {
+    "url": "https://github.com/LiterallyBlah/paperclip-plugin-ntfy/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/LiterallyBlah/paperclip-plugin-ntfy.git"
+  },
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "keywords": [
+    "paperclip",
+    "plugin",
+    "ntfy",
+    "notifications"
+  ],
+  "scripts": {
+    "build": "rm -rf dist && tsc",
+    "clean": "rm -rf dist artifact",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
+    "test": "vitest run",
+    "build:artifact": "node scripts/build-artifact.mjs"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "2026.1106.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "esbuild": "^0.28.2",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.3"
+  },
+  "engines": {
+    "node": ">=24.11.0"
+  },
+  "packageManager": "pnpm@10.34.9",
+  "pnpm": {
+    "ignoredBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
