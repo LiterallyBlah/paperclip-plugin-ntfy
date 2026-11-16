@@ -27,6 +27,12 @@ export interface NotifierConfig {
   priority: number | null;
   allowInsecureHttp: boolean;
   triggers: NotifierTriggers;
+  /** Hold pushes for items the triage agent did not raise (only when `triageAgentId` is set). */
+  holdNonTriageItems: boolean;
+  /** How long a hold lasts before the item is re-read, in seconds. */
+  holdSeconds: number;
+  /** Agent whose own items push at once. `null` disables holding: 0.3.0 behaviour. */
+  triageAgentId: string | null;
 }
 
 export type ConfigParseResult =
@@ -41,12 +47,18 @@ const TOP_LEVEL_KEYS = new Set([
   "priority",
   "allowInsecureHttp",
   "triggers",
+  "holdNonTriageItems",
+  "holdSeconds",
+  "triageAgentId",
 ]);
 const TRIGGER_KEYS = new Set(["approvals", "interactions", "blockerAttention", "decisions"]);
 const SECRET_REF_KEYS = new Set(["type", "secretId", "version", "projectionClass", "projectionAllowlistKey"]);
 
 /** ntfy topic names: letters, digits, `_` and `-`, at most 64 characters. */
 const TOPIC_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export const DEFAULT_HOLD_SECONDS = 120;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -154,12 +166,41 @@ export function parseConfig(raw: unknown): ConfigParseResult {
     }
   }
 
+  const holdNonTriageItems = parseBoolean("holdNonTriageItems", raw.holdNonTriageItems, true, errors);
+  let holdSeconds = DEFAULT_HOLD_SECONDS;
+  if (raw.holdSeconds !== undefined) {
+    if (typeof raw.holdSeconds !== "number" || !Number.isInteger(raw.holdSeconds) || raw.holdSeconds < 1 || raw.holdSeconds > 3600) {
+      errors.push("holdSeconds must be an integer from 1 to 3600");
+    } else {
+      holdSeconds = raw.holdSeconds;
+    }
+  }
+  let triageAgentId: string | null = null;
+  if (raw.triageAgentId !== undefined && raw.triageAgentId !== null && raw.triageAgentId !== "") {
+    if (typeof raw.triageAgentId !== "string" || !UUID_PATTERN.test(raw.triageAgentId)) {
+      errors.push("triageAgentId must be an agent UUID, or empty");
+    } else {
+      triageAgentId = raw.triageAgentId.toLowerCase();
+    }
+  }
+
   if (errors.length > 0 || !ntfyBaseUrl || !paperclipBaseUrl || !topic) {
     return { ok: false, errors };
   }
   return {
     ok: true,
-    config: { ntfyBaseUrl, topic, tokenSecretRef, paperclipBaseUrl, priority, allowInsecureHttp, triggers },
+    config: {
+      ntfyBaseUrl,
+      topic,
+      tokenSecretRef,
+      paperclipBaseUrl,
+      priority,
+      allowInsecureHttp,
+      triggers,
+      holdNonTriageItems,
+      holdSeconds,
+      triageAgentId,
+    },
   };
 }
 
@@ -212,6 +253,25 @@ export const INSTANCE_CONFIG_SCHEMA = {
         blockerAttention: { type: "boolean", default: true, title: "Blocked work that needs board attention" },
         decisions: { type: "boolean", default: true, title: "Agent decisions waiting for a board response" },
       },
+    },
+    triageAgentId: {
+      type: "string",
+      title: "Triage agent id (optional)",
+      description:
+        "UUID of an agent that triages decisions. When set, items that agent raised push at once and other items are held first. Leave empty to push every item at once.",
+    },
+    holdNonTriageItems: {
+      type: "boolean",
+      default: true,
+      title: "Hold items not raised by the triage agent",
+      description: "Only applies when a triage agent is set. A held item is pushed only if it is still open when the hold ends.",
+    },
+    holdSeconds: {
+      type: "integer",
+      minimum: 1,
+      maximum: 3600,
+      default: DEFAULT_HOLD_SECONDS,
+      title: "Hold time (seconds)",
     },
   },
 } as const;

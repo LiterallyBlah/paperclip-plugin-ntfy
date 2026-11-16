@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.0
+
+- New optional hold-until-triage: settings `triageAgentId` (default empty),
+  `holdNonTriageItems` (default `true`) and `holdSeconds` (default `120`).
+  Without `triageAgentId` behaviour is unchanged from 0.3.0.
+- Items raised by the triage agent push at once; other items are held and
+  pushed only if still open when the hold ends. Holds survive a restart; an
+  overdue hold or a failed re-read pushes.
+- New capability `approvals.read` for the approval re-read.
+
 ## 0.3.0
 
 First standalone release. Notification behaviour is unchanged from the

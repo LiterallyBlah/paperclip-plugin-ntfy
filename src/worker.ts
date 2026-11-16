@@ -22,22 +22,31 @@ export const SUBSCRIBED_EVENTS = [
   DECISION_CREATED,
 ] as const;
 
+let current: DecisionNotifier | null = null;
+
 const plugin = definePlugin({
   multiCompanyConfig: true,
 
   async setup(ctx) {
     const notifier = new DecisionNotifier(ctx);
+    current = notifier;
     const handler = async (event: PluginEvent) => {
       await notifier.handle(event);
     };
     for (const name of SUBSCRIBED_EVENTS) {
       ctx.events.on(name as PluginEventType, handler);
     }
+    // Holds persisted before a restart: overdue ones push at once (fail open).
+    await notifier.start();
   },
 
   async onValidateConfig(config) {
     const parsed = parseConfig(config);
     return parsed.ok ? { ok: true } : { ok: false, errors: parsed.errors };
+  },
+
+  async onShutdown() {
+    current?.stop();
   },
 
   async onHealth() {

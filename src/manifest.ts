@@ -2,7 +2,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 import { INSTANCE_CONFIG_SCHEMA } from "./config.js";
 
 export const PLUGIN_ID = "paperclip.ntfy-notifier";
-export const PLUGIN_VERSION = "0.3.0";
+export const PLUGIN_VERSION = "0.4.0";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
@@ -10,7 +10,7 @@ const manifest: PaperclipPluginManifestV1 = {
   version: PLUGIN_VERSION,
   displayName: "ntfy Decision Notifier",
   description:
-    "Sends a minimal ntfy push (title \"Paperclip decision <issue>\", tag \"paperclip\", body \"A decision is waiting: <issue>\" plus a link) when a new approval is created or an issue becomes blocked on a human-owned unblock step. Person-addressed questions and board decisions notify only on hosts that emit those events.",
+    "Sends a minimal ntfy push (title \"Paperclip decision <issue>\", tag \"paperclip\", body \"A decision is waiting: <issue>\" plus a link) when a new approval is created or an issue becomes blocked on a human-owned unblock step. Person-addressed questions and board decisions notify only on hosts that emit those events. Optionally holds pushes for items a configured triage agent did not raise, and pushes them only if still open when the hold ends.",
   author: "LiterallyBlah",
   categories: ["connector", "automation"],
   capabilities: [
@@ -22,6 +22,7 @@ const manifest: PaperclipPluginManifestV1 = {
     "issues.read",
     "issue.interactions.read",
     "companies.read",
+    "approvals.read",
   ],
   entrypoints: {
     worker: "./dist/worker.js",

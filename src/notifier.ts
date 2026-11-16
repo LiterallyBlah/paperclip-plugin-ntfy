@@ -1,6 +1,7 @@
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import { parseConfig, type NotifierConfig } from "./config.js";
-import { DecisionDedupe } from "./dedupe.js";
+import { isRaisedByTriage } from "./creator.js";
+import { DecisionDedupe, DEDUPE_NAMESPACE } from "./dedupe.js";
 import { buildClickUrl, buildMessageBody, buildMessageTitle, buildPublishUrl, MESSAGE_TAGS, type MessageTarget } from "./message.js";
 import { sendNtfy, type FetchLike } from "./ntfy.js";
 import {
@@ -22,7 +23,31 @@ export interface NotifierOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Override for tests; defaults to the host-mediated `ctx.http.fetch`. */
   fetch?: FetchLike;
+  /** Clock and timer overrides for tests (hold-until-triage). */
+  now?: () => number;
+  setTimer?: (fn: () => void, ms: number) => unknown;
+  clearTimer?: (handle: unknown) => void;
 }
+
+/**
+ * A push held until the triage window ends. Persisted (instance scope) so a
+ * hold survives a plugin restart. Carries ids only, never text.
+ */
+export interface HeldPush {
+  companyId: string;
+  key: string;
+  mode: "once" | "episode";
+  candidate: DecisionCandidate;
+  dueAt: number;
+}
+
+interface HoldState {
+  v: 1;
+  holds: HeldPush[];
+}
+
+/** Upper bound on persisted holds; beyond it items push at once (fail open). */
+export const MAX_HOLDS = 500;
 
 interface ResolvedDecision {
   key: string;
@@ -47,6 +72,8 @@ export type NotifyOutcome =
   | "sent"
   | "send_failed"
   | "token_unavailable"
+  | "held"
+  | "hold_cleared"
   | "error";
 
 /**
@@ -58,6 +85,9 @@ export class DecisionNotifier {
   private readonly dedupe: DecisionDedupe;
   /** Tail of the handler chain per company and feed key; see `handle`. */
   private readonly feedQueue = new Map<string, Promise<unknown>>();
+  private holdLock: Promise<unknown> = Promise.resolve();
+  private holdTimer: unknown = null;
+  private holdTimerDueAt: number | null = null;
 
   constructor(
     private readonly ctx: PluginContext,
@@ -109,7 +139,21 @@ export class DecisionNotifier {
       const key = { companyId: candidate.companyId, key: decision.key };
       if (decision.mode === "close") {
         await this.dedupe.closeEpisode(key);
+        // The item left the feed while held: it is no longer waiting, so the hold ends without a push.
+        await this.cancelHold(candidate.companyId, decision.key);
         return this.log(kind, "episode_closed");
+      }
+
+      // Hold-until-triage: only with a triage agent set; its own items push at once.
+      if (config.triageAgentId && config.holdNonTriageItems && !isRaisedByTriage(event, config.triageAgentId)) {
+        const held = await this.hold(config, {
+          companyId: candidate.companyId,
+          key: decision.key,
+          mode: decision.mode === "episode" ? "episode" : "once",
+          candidate,
+          dueAt: 0,
+        });
+        if (held !== "push_now") return this.log(kind, held);
       }
 
       let sendOutcome: NotifyOutcome = "send_failed";
@@ -201,6 +245,174 @@ export class DecisionNotifier {
       }
       case "decision":
         return { key: `decision:${candidate.decisionId}`, issue: null };
+    }
+  }
+
+  // ---- hold-until-triage -------------------------------------------------
+
+  private now(): number {
+    return (this.options.now ?? Date.now)();
+  }
+
+  private holdExclusive<T>(op: () => Promise<T>): Promise<T> {
+    const result = this.holdLock.then(op, op);
+    this.holdLock = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  private holdScope() {
+    return { scopeKind: "instance" as const, namespace: DEDUPE_NAMESPACE, stateKey: "holds" };
+  }
+
+  private async loadHolds(): Promise<HeldPush[]> {
+    const raw = (await this.ctx.state.get(this.holdScope())) as HoldState | null | undefined;
+    return raw && raw.v === 1 && Array.isArray(raw.holds) ? raw.holds : [];
+  }
+
+  private async saveHolds(holds: HeldPush[]): Promise<void> {
+    await this.ctx.state.set(this.holdScope(), { v: 1, holds } satisfies HoldState);
+  }
+
+  /** Persist a hold. Returns `push_now` when the item cannot be held (fail open). */
+  private hold(config: NotifierConfig, item: HeldPush): Promise<NotifyOutcome | "push_now"> {
+    return this.holdExclusive(async (): Promise<NotifyOutcome | "push_now"> => {
+      try {
+        if (await this.dedupe.alreadySent({ companyId: item.companyId, key: item.key }, item.mode)) return "duplicate";
+        const holds = await this.loadHolds();
+        if (holds.some((entry) => entry.companyId === item.companyId && entry.key === item.key)) return "duplicate";
+        if (holds.length >= MAX_HOLDS) return "push_now";
+        holds.push({ ...item, dueAt: this.now() + config.holdSeconds * 1000 });
+        await this.saveHolds(holds);
+        this.scheduleHolds(holds);
+        return "held";
+      } catch {
+        return "push_now";
+      }
+    });
+  }
+
+  private cancelHold(companyId: string, key: string): Promise<void> {
+    return this.holdExclusive(async () => {
+      const holds = await this.loadHolds();
+      const kept = holds.filter((entry) => !(entry.companyId === companyId && entry.key === key));
+      if (kept.length === holds.length) return;
+      await this.saveHolds(kept);
+      this.scheduleHolds(kept);
+    });
+  }
+
+  /**
+   * Resume persisted holds after a restart. Holds that are already overdue are
+   * pushed at once without a re-read (fail open); the rest are re-armed.
+   */
+  async start(): Promise<void> {
+    await this.releaseDue({ reRead: false });
+  }
+
+  stop(): void {
+    if (this.holdTimer !== null) (this.options.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>)))(this.holdTimer);
+    this.holdTimer = null;
+    this.holdTimerDueAt = null;
+  }
+
+  private scheduleHolds(holds: HeldPush[]): void {
+    if (holds.length === 0) {
+      this.stop();
+      return;
+    }
+    const due = Math.min(...holds.map((entry) => entry.dueAt));
+    if (this.holdTimer !== null && this.holdTimerDueAt !== null && this.holdTimerDueAt <= due) return;
+    this.stop();
+    const setTimer =
+      this.options.setTimer ??
+      ((fn: () => void, ms: number) => {
+        const handle = setTimeout(fn, ms);
+        handle.unref?.();
+        return handle;
+      });
+    this.holdTimerDueAt = due;
+    this.holdTimer = setTimer(() => {
+      this.holdTimer = null;
+      this.holdTimerDueAt = null;
+      void this.releaseDue({ reRead: true });
+    }, Math.max(0, due - this.now()));
+  }
+
+  /**
+   * End every due hold: re-read the item and push only if it is still open.
+   * A failed re-read pushes. A hold is removed only after its push attempt, so
+   * a restart in between pushes again, and the sent marker absorbs a repeat.
+   * Exposed for tests; normally run by the timer.
+   */
+  releaseDue(options: { reRead: boolean } = { reRead: true }): Promise<Array<{ key: string; outcome: NotifyOutcome }>> {
+    return this.holdExclusive(async () => {
+      const results: Array<{ key: string; outcome: NotifyOutcome }> = [];
+      let holds: HeldPush[];
+      try {
+        holds = await this.loadHolds();
+      } catch {
+        return results;
+      }
+      const now = this.now();
+      for (const item of holds.filter((entry) => entry.dueAt <= now)) {
+        const outcome = await this.releaseOne(item, options.reRead).catch((): NotifyOutcome => "error");
+        results.push({ key: item.key, outcome });
+        this.log(item.candidate.kind, outcome);
+        holds = holds.filter((entry) => entry !== item);
+        await this.saveHolds(holds).catch(() => undefined);
+      }
+      this.holdTimer = null;
+      this.holdTimerDueAt = null;
+      this.scheduleHolds(holds);
+      return results;
+    });
+  }
+
+  private async releaseOne(item: HeldPush, reRead: boolean): Promise<NotifyOutcome> {
+    const config = await this.loadConfig(item.companyId);
+    if (!config) return "not_configured";
+    if (reRead && !(await this.stillOpen(item).catch(() => true))) return "hold_cleared";
+    let sendOutcome: NotifyOutcome = "send_failed";
+    const send = async () => {
+      sendOutcome = await this.send(config, item.candidate, null);
+      return sendOutcome === "sent";
+    };
+    const key = { companyId: item.companyId, key: item.key };
+    const result = item.mode === "episode" ? await this.dedupe.runEpisode(key, send) : await this.dedupe.runOnce(key, send);
+    return result === "duplicate" ? "duplicate" : sendOutcome;
+  }
+
+  /**
+   * Whether a held item still waits for a person. Anything that cannot be
+   * confirmed as resolved counts as open (push).
+   */
+  private async stillOpen(item: HeldPush): Promise<boolean> {
+    const candidate = item.candidate;
+    switch (candidate.kind) {
+      case "approval": {
+        const approval = (await this.ctx.approvals.get(candidate.approvalId, candidate.companyId)) as { status?: unknown } | null;
+        if (!approval) return true;
+        return !["approved", "rejected", "cancelled", "revision_requested"].includes(String(approval.status));
+      }
+      case "interaction": {
+        const cards = await this.ctx.issues.listInteractions(candidate.issueId, candidate.companyId);
+        const card = cards.find((entry) => entry.id === candidate.interactionId) as { status?: unknown } | undefined;
+        return !card || card.status === "pending";
+      }
+      case "blocker":
+      case "blocker_tree": {
+        // Feed episodes end through the exit event, which cancels the hold.
+        if (item.mode === "episode") return true;
+        const issue = (await this.ctx.issues.get(candidate.issueId, candidate.companyId)) as IssueBlockerView | null;
+        if (!issue) return true;
+        return isHumanOwnedBlocker(issue) && blockerDecisionKey(candidate.issueId, issue) === item.key;
+      }
+      case "decision":
+        // No plugin read surface for board decisions: push.
+        return true;
     }
   }
 

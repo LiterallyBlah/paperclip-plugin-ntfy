@@ -27,6 +27,7 @@ describe("worker wiring", () => {
 
   it("declares only the capabilities it uses", () => {
     expect([...manifest.capabilities].sort()).toEqual([
+      "approvals.read",
       "companies.read",
       "events.subscribe",
       "http.outbound",
