@@ -134,6 +134,9 @@ rejected.
 | `priority` | no | ntfy priority, an integer from 1 to 5. |
 | `triggers` | no | `{ "approvals": true, "interactions": true, "blockerAttention": true, "decisions": true }`. Each flag defaults to `true`. `blockerAttention` covers both blocker rows above. |
 | `allowInsecureHttp` | no | Allows `http://` URLs, for testing only. Default `false`. It is rejected together with `tokenSecretRef`, so a token is never sent over plain http. |
+| `triageAgentId` | no | UUID of an agent that triages decisions before a person is notified. Default empty: no holding, every push is sent at once (0.3.0 behaviour). |
+| `holdNonTriageItems` | no | Default `true`. Applies only when `triageAgentId` is set: items that agent did not raise are held first. |
+| `holdSeconds` | no | Hold length, an integer from 1 to 3600. Default `120`. |
 
 Example:
 
@@ -149,6 +152,24 @@ Example:
 
 Anyone who can subscribe to the topic sees every push. Use a private topic
 with an access token on a server you trust, or an unguessable topic name.
+
+## Hold until triage
+
+When `triageAgentId` is set and `holdNonTriageItems` is on:
+
+- An item whose creating actor is the triage agent pushes at once.
+- Any other item (another agent, a board user, the platform, or an item whose
+  creator the event does not state) is held for `holdSeconds`. When the hold
+  ends the plugin re-reads the item and pushes only if it still waits for a
+  person: an approval still `pending`, a card still `pending`, an issue still
+  blocked on the same human-owned step, a blocker-attention item that has not
+  left the feed. Board decisions have no plugin read surface, so they always
+  push when the hold ends.
+- Holds are stored in plugin state and survive a restart. A hold that is
+  already overdue when the worker starts, or whose re-read fails, pushes. A
+  push is never dropped silently in favour of a hold.
+
+The re-read of approvals needs the `approvals.read` capability.
 
 ## Security notes
 
@@ -198,7 +219,7 @@ with an access token on a server you trust, or an unguessable topic name.
 
 `events.subscribe`, `http.outbound`, `secrets.read-ref`, `plugin.state.read`,
 `plugin.state.write`, `issues.read`, `issue.interactions.read`,
-`companies.read`.
+`companies.read`, `approvals.read` (hold re-read, 0.4.0).
 
 ## Building from source
 

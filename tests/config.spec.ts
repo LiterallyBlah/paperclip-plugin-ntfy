@@ -15,8 +15,27 @@ describe("config validation", () => {
         priority: null,
         allowInsecureHttp: false,
         triggers: { approvals: true, interactions: true, blockerAttention: true, decisions: true },
+        holdNonTriageItems: true,
+        holdSeconds: 120,
+        triageAgentId: null,
       },
     });
+  });
+
+  it.each([
+    [{ triageAgentId: "not-a-uuid" }, "triageAgentId must be an agent UUID, or empty"],
+    [{ holdSeconds: 0 }, "holdSeconds must be an integer from 1 to 3600"],
+    [{ holdSeconds: 1.5 }, "holdSeconds must be an integer from 1 to 3600"],
+    [{ holdNonTriageItems: "yes" }, "holdNonTriageItems must be a boolean"],
+  ])("rejects hold settings %j", (patch, message) => {
+    const result = parseConfig({ ...BASE_CONFIG, ...patch });
+    expect(result.ok).toBe(false);
+    expect(!result.ok && result.errors.join("; ")).toContain(message);
+  });
+
+  it("accepts an empty triage agent id as 'no holding'", () => {
+    const result = parseConfig({ ...BASE_CONFIG, triageAgentId: "" });
+    expect(result.ok && result.config.triageAgentId).toBeNull();
   });
 
   it("normalises trailing slashes", () => {

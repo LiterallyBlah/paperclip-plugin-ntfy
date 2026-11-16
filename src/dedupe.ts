@@ -65,6 +65,13 @@ export class DecisionDedupe {
     return `${decision.companyId}\u0000${decision.key}`;
   }
 
+  /** True when this decision was already pushed (for an episode: while it is open). */
+  async alreadySent(decision: DecisionKey, mode: "once" | "episode"): Promise<boolean> {
+    const existing = (await this.state.get(this.scope(decision))) as EpisodeMarker | SentMarker | null | undefined;
+    if (existing === null || existing === undefined) return false;
+    return mode === "once" || (existing as EpisodeMarker).open !== false;
+  }
+
   /**
    * Run `send` at most once per decision unless it reports failure.
    * Returns `"duplicate"` when the decision was already sent or is being sent.
