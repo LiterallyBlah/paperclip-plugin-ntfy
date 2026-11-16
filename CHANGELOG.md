@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.1
+
+Hardening release. No new capability, setting or trigger.
+
+- A held push whose release fails (for example because the configuration
+  could not be read) is kept and retried (30 s, doubling to at most 15 min)
+  instead of being dropped.
+- A release that runs outside the hold timer clears the armed timer before
+  arming a new one.
+- Sent markers are pruned once they have not been touched for 30 days. A
+  marker is touched on every send and on every later event for the same item,
+  and a marker is kept while its item is still live (an open feed episode, or
+  an issue still blocked on the same human-owned step). An instance-scope
+  index (`marker-index`) tracks the markers, because plugin state cannot be
+  listed. Markers written by 0.4.0 or earlier join the index the next time an
+  event for their item arrives.
+
 ## 0.4.0
 
 - New optional hold-until-triage: settings `triageAgentId` (default empty),

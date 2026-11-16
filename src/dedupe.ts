@@ -1,4 +1,5 @@
 import type { PluginStateClient } from "@paperclipai/plugin-sdk";
+import type { MarkerIndex } from "./marker-index.js";
 
 /**
  * Durable, identity-keyed dedupe.
@@ -22,6 +23,9 @@ import type { PluginStateClient } from "@paperclipai/plugin-sdk";
  * A timeout is not retried (see `sendNtfy`), so one send publishes at most
  * once after a timeout. A rare extra push is preferred over a silently lost
  * decision.
+ *
+ * Markers are pruned by age through an optional `MarkerIndex` (see
+ * `marker-index.ts`); every write and every absorbed duplicate touches it.
  */
 
 export const DEDUPE_NAMESPACE = "ntfy-notifier";
@@ -50,7 +54,14 @@ export class DecisionDedupe {
   private readonly inFlight = new Set<string>();
   private readonly episodeQueue = new Map<string, Promise<void>>();
 
-  constructor(private readonly state: PluginStateClient) {}
+  constructor(
+    private readonly state: PluginStateClient,
+    private readonly index: MarkerIndex | null = null,
+  ) {}
+
+  private async touch(decision: DecisionKey, written: boolean): Promise<void> {
+    await this.index?.touch({ companyId: decision.companyId, stateKey: this.scope(decision).stateKey }, written);
+  }
 
   private scope(decision: DecisionKey) {
     return {
@@ -69,7 +80,9 @@ export class DecisionDedupe {
   async alreadySent(decision: DecisionKey, mode: "once" | "episode"): Promise<boolean> {
     const existing = (await this.state.get(this.scope(decision))) as EpisodeMarker | SentMarker | null | undefined;
     if (existing === null || existing === undefined) return false;
-    return mode === "once" || (existing as EpisodeMarker).open !== false;
+    const sent = mode === "once" || (existing as EpisodeMarker).open !== false;
+    if (sent) await this.touch(decision, false);
+    return sent;
   }
 
   /**
@@ -86,11 +99,15 @@ export class DecisionDedupe {
     this.inFlight.add(memoryKey);
     try {
       const existing = await this.state.get(this.scope(decision));
-      if (existing !== null && existing !== undefined) return "duplicate";
+      if (existing !== null && existing !== undefined) {
+        await this.touch(decision, false);
+        return "duplicate";
+      }
       const ok = await send();
       if (!ok) return "failed";
       const marker: SentMarker = { v: 1, sentAt: now().toISOString() };
       await this.state.set(this.scope(decision), marker);
+      await this.touch(decision, true);
       return "sent";
     } finally {
       this.inFlight.delete(memoryKey);
@@ -133,11 +150,15 @@ export class DecisionDedupe {
   ): Promise<"sent" | "duplicate" | "failed"> {
     return this.serial(decision, async () => {
       const existing = (await this.state.get(this.scope(decision))) as EpisodeMarker | null | undefined;
-      if (existing && existing.open !== false) return "duplicate";
+      if (existing && existing.open !== false) {
+        await this.touch(decision, false);
+        return "duplicate";
+      }
       const ok = await send();
       if (!ok) return "failed";
       const marker: EpisodeMarker = { v: 1, open: true, sentAt: now().toISOString() };
       await this.state.set(this.scope(decision), marker);
+      await this.touch(decision, true);
       return "sent";
     });
   }
@@ -148,6 +169,7 @@ export class DecisionDedupe {
       const existing = (await this.state.get(this.scope(decision))) as EpisodeMarker | null | undefined;
       if (!existing || existing.open === false) return;
       await this.state.set(this.scope(decision), { ...existing, open: false, closedAt: now().toISOString() });
+      await this.touch(decision, true);
     });
   }
 }

@@ -167,7 +167,8 @@ When `triageAgentId` is set and `holdNonTriageItems` is on:
   push when the hold ends.
 - Holds are stored in plugin state and survive a restart. A hold that is
   already overdue when the worker starts, or whose re-read fails, pushes. A
-  push is never dropped silently in favour of a hold.
+  push is never dropped silently in favour of a hold. A hold whose release
+  fails (for example the configuration cannot be read) is kept and retried.
 
 The re-read of approvals needs the `approvals.read` capability.
 
@@ -204,6 +205,12 @@ The re-read of approvals needs the `approvals.read` capability.
   item sends one push per feed episode. Duplicate deliveries and worker
   restarts do not send twice. Concurrent deliveries in one worker are
   collapsed.
+- **Marker pruning.** A sent marker that has not been touched for 30 days is
+  deleted (checked at start and at most once a day). Every send and every later
+  event for the same item touches it, and it is kept while the item is still
+  live: an open feed episode, or an issue still blocked on the same
+  human-owned step. So dedupe holds for live items, and a closed item that
+  stays silent for 30 days stops taking space.
 - **At-least-once.** A decision is marked only after ntfy accepts the
   publish. A failed send is not marked, so a later delivery of the same event
   can still send it. Rare duplicates remain possible when the worker stops

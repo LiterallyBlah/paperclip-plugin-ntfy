@@ -1,7 +1,8 @@
 import type { PluginContext, PluginEvent } from "@paperclipai/plugin-sdk";
 import { parseConfig, type NotifierConfig } from "./config.js";
 import { isRaisedByTriage } from "./creator.js";
-import { DecisionDedupe, DEDUPE_NAMESPACE } from "./dedupe.js";
+import { DecisionDedupe, DEDUPE_NAMESPACE, type EpisodeMarker } from "./dedupe.js";
+import { blockerIssueId, MarkerIndex, type MarkerRef } from "./marker-index.js";
 import { buildClickUrl, buildMessageBody, buildMessageTitle, buildPublishUrl, MESSAGE_TAGS, type MessageTarget } from "./message.js";
 import { sendNtfy, type FetchLike } from "./ntfy.js";
 import {
@@ -39,6 +40,8 @@ export interface HeldPush {
   mode: "once" | "episode";
   candidate: DecisionCandidate;
   dueAt: number;
+  /** Release attempts that ended in an error (0.4.1+; absent means 0). */
+  retries?: number;
 }
 
 interface HoldState {
@@ -48,6 +51,10 @@ interface HoldState {
 
 /** Upper bound on persisted holds; beyond it items push at once (fail open). */
 export const MAX_HOLDS = 500;
+
+/** Retry delay for a hold whose release failed: 30 s doubling, at most 15 min. */
+export const HOLD_RETRY_BASE_MS = 30_000;
+export const HOLD_RETRY_MAX_MS = 15 * 60_000;
 
 interface ResolvedDecision {
   key: string;
@@ -83,6 +90,8 @@ export type NotifyOutcome =
  */
 export class DecisionNotifier {
   private readonly dedupe: DecisionDedupe;
+  /** Age-based pruning of the per-item sent markers. Exposed for tests. */
+  readonly markers: MarkerIndex;
   /** Tail of the handler chain per company and feed key; see `handle`. */
   private readonly feedQueue = new Map<string, Promise<unknown>>();
   private holdLock: Promise<unknown> = Promise.resolve();
@@ -93,7 +102,24 @@ export class DecisionNotifier {
     private readonly ctx: PluginContext,
     private readonly options: NotifierOptions = DEFAULT_NOTIFIER_OPTIONS,
   ) {
-    this.dedupe = new DecisionDedupe(ctx.state);
+    this.markers = new MarkerIndex(ctx.state, DEDUPE_NAMESPACE, {
+      now: () => this.now(),
+      keep: (ref, value) => this.markerStillLive(ref, value),
+    });
+    this.dedupe = new DecisionDedupe(ctx.state, this.markers);
+  }
+
+  /**
+   * A marker past its age is kept while its item is still live: an open feed
+   * episode, or a human-owned block that has not changed since the push.
+   */
+  private async markerStillLive(ref: MarkerRef, value: unknown): Promise<boolean> {
+    if ((value as EpisodeMarker | null)?.open === true) return true;
+    const key = ref.stateKey.startsWith("sent:") ? ref.stateKey.slice("sent:".length) : ref.stateKey;
+    const issueId = blockerIssueId(key);
+    if (!issueId) return false;
+    const issue = (await this.ctx.issues.get(issueId, ref.companyId)) as IssueBlockerView | null;
+    return !!issue && isHumanOwnedBlocker(issue) && blockerDecisionKey(issueId, issue) === key;
   }
 
   /**
@@ -310,6 +336,7 @@ export class DecisionNotifier {
    */
   async start(): Promise<void> {
     await this.releaseDue({ reRead: false });
+    await this.markers.maybePrune();
   }
 
   stop(): void {
@@ -361,11 +388,20 @@ export class DecisionNotifier {
         const outcome = await this.releaseOne(item, options.reRead).catch((): NotifyOutcome => "error");
         results.push({ key: item.key, outcome });
         this.log(item.candidate.kind, outcome);
-        holds = holds.filter((entry) => entry !== item);
+        if (outcome === "error") {
+          // Fail open: the release could not run (for example the config read
+          // threw). Keep the hold and try again later instead of dropping it.
+          const retries = (item.retries ?? 0) + 1;
+          const delay = Math.min(HOLD_RETRY_BASE_MS * 2 ** Math.min(retries - 1, 10), HOLD_RETRY_MAX_MS);
+          holds = holds.map((entry) => (entry === item ? { ...item, retries, dueAt: now + delay } : entry));
+          this.ctx.logger.warn("ntfy notifier: held push not released; will retry", { kind: item.candidate.kind, retries });
+        } else {
+          holds = holds.filter((entry) => entry !== item);
+        }
         await this.saveHolds(holds).catch(() => undefined);
       }
-      this.holdTimer = null;
-      this.holdTimerDueAt = null;
+      // Clear any armed timer before re-arming (this run may not be the timer's).
+      this.stop();
       this.scheduleHolds(holds);
       return results;
     });

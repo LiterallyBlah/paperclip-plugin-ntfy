@@ -234,4 +234,44 @@ describe("hold-until-triage", () => {
     await s.advance(5_000);
     expect(s.requests).toHaveLength(1);
   });
+
+  it("config read throws at release -> the hold is kept and retried, then pushes (fail open)", async () => {
+    const s = holdSetup();
+    await s.notifier.handle(connectionIntent());
+    const realGet = s.harness.ctx.config.get.bind(s.harness.ctx.config);
+    let failures = 2;
+    s.harness.ctx.config.get = (async (...args: Parameters<typeof realGet>) => {
+      if (failures > 0) {
+        failures -= 1;
+        throw new Error("config store unavailable");
+      }
+      return realGet(...args);
+    }) as typeof s.harness.ctx.config.get;
+    await s.advance(HOLD_MS);
+    expect(s.requests).toHaveLength(0);
+    const held = (await s.harness.ctx.state.get({ scopeKind: "instance", namespace: "ntfy-notifier", stateKey: "holds" })) as {
+      holds: Array<{ retries?: number }>;
+    };
+    expect(held.holds).toHaveLength(1);
+    expect(held.holds[0].retries).toBe(1);
+    await s.advance(30_000);
+    expect(s.requests).toHaveLength(0);
+    await s.advance(60_000);
+    expect(s.requests).toHaveLength(1);
+    const after = (await s.harness.ctx.state.get({ scopeKind: "instance", namespace: "ntfy-notifier", stateKey: "holds" })) as {
+      holds: unknown[];
+    };
+    expect(after.holds).toHaveLength(0);
+  });
+
+  it("a release run outside the timer clears the armed timer before re-arming", async () => {
+    const s = holdSetup();
+    await s.notifier.handle(connectionIntent());
+    expect(s.timers).toHaveLength(1);
+    await s.notifier.releaseDue();
+    expect(s.timers).toHaveLength(1);
+    await s.advance(HOLD_MS);
+    expect(s.requests).toHaveLength(1);
+    expect(s.timers).toHaveLength(0);
+  });
 });

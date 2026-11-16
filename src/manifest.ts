@@ -2,7 +2,7 @@ import type { PaperclipPluginManifestV1 } from "@paperclipai/plugin-sdk";
 import { INSTANCE_CONFIG_SCHEMA } from "./config.js";
 
 export const PLUGIN_ID = "paperclip.ntfy-notifier";
-export const PLUGIN_VERSION = "0.4.0";
+export const PLUGIN_VERSION = "0.4.1";
 
 const manifest: PaperclipPluginManifestV1 = {
   id: PLUGIN_ID,
