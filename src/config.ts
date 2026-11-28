@@ -221,7 +221,9 @@ export const INSTANCE_CONFIG_SCHEMA = {
       pattern: "^[A-Za-z0-9_-]{1,64}$",
     },
     tokenSecretRef: {
-      type: "object",
+      // The host checks secret-ref fields against the secret id, so this is a
+      // string here even though the worker receives the binding object.
+      type: "string",
       format: "secret-ref",
       title: "ntfy access token (secret reference)",
       description: "Paperclip secret holding an ntfy access token with publish permission on the topic. Leave empty for an open topic.",
