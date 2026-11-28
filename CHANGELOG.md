@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.2
+
+Fix release. No new capability, setting or trigger.
+
+- The access token setting (`tokenSecretRef`) is declared as a string
+  secret reference. The host validates a secret reference by its secret id,
+  so 0.4.1 rejected any configuration with an access token
+  ("must be object") before it reached the worker. The worker still
+  receives and accepts the `{ "type": "secret_ref", "secretId": ... }`
+  binding.
+
 ## 0.4.1
 
 Hardening release. No new capability, setting or trigger.

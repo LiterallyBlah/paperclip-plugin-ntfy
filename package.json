@@ -1,6 +1,6 @@
 {
   "name": "paperclip-plugin-ntfy",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "private": true,
   "description": "Paperclip plugin that sends a minimal ntfy push when a decision is waiting for a person",
   "license": "MIT",
@@ -47,6 +47,8 @@
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "ajv": "^8.20.0",
+    "ajv-formats": "^3.0.1",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
     "vitest": "^5.0.3"
